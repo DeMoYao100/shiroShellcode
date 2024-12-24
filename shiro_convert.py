@@ -270,6 +270,10 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
             if (start_idx >= len(self.a_b_maps.b_string)):
                 break
         self.a_b_maps.b_zip = list(zip(self.a_b_maps.b_key_idx, self.a_b_maps.b_start, self.a_b_maps.b_end))
+        print("asm_to_hex:")
+        print("self.a_b_maps.a_zip",self.a_b_maps.a_zip)
+        print("self.a_b_maps.b_zip", self.a_b_maps.b_zip)
+
 
     def asm_to_hex(self, asm_text):
         # 将asm转换为hex，初始化a, b的映射
@@ -277,23 +281,59 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
             self.hex_input.clear()
             return
         asm_text_all = asm_text
-        asm_text = asm_text.splitlines()
         asm_to_hex_a = []
         asm_to_hex_b = []
-        try:
-            for line in asm_text:
-                if line.strip() == "":
-                    continue
-                encoding, _ = self.ks.asm(line)
-                hex_code = binascii.hexlify(bytearray(encoding)).decode('utf-8')
-                hex_code = ' '.join([hex_code[i:i+2] for i in range(0, len(hex_code), 2)])
-                asm_to_hex_a.append(hex_code)
-                asm_to_hex_b.append(line)
-        except Exception as e:
-            # hex_code = "Invalid assembly input"
-            pass
-        self.a_b_maps.a, self.a_b_maps.b = asm_to_hex_a, asm_to_hex_b
 
+        # asm_text = asm_text.splitlines()
+        # try:
+        #     for line in asm_text:
+        #         if line.strip() == "":
+        #             continue
+        #         encoding, _ = self.ks.asm(line)
+        #         hex_code = binascii.hexlify(bytearray(encoding)).decode('utf-8')
+        #         hex_code = ' '.join([hex_code[i:i+2] for i in range(0, len(hex_code), 2)])
+        #         asm_to_hex_a.append(hex_code)
+        #         asm_to_hex_b.append(line)
+        # except Exception as e:
+        #     # hex_code = "Invalid assembly input"
+        #     pass
+
+        try:
+            # 一次性汇编整个代码
+            start_address = 0x1000
+            encoding, _ = self.ks.asm(asm_text_all, start_address)
+
+            # 使用 Capstone 逐条反汇编以获取每条指令的信息
+            disassembled = {insn.address: binascii.hexlify(insn.bytes).decode('utf-8')
+                            for insn in self.cs.disasm(bytes(encoding), start_address)}
+
+            current_address = start_address
+
+            for line in asm_text_all.splitlines():
+                stripped_line = line.strip()
+
+                if stripped_line.replace(' ', '') == "":# 空行
+                    asm_to_hex_b.append(line)
+                    asm_to_hex_a.append("")
+                    continue
+
+                if (':' in stripped_line):# 标签行
+                    asm_to_hex_b.append(line)
+                    asm_to_hex_a.append("")
+                    continue
+
+                # 尝试从反汇编结果中找到对应的机器码
+                hex_code = disassembled.get(current_address, None)
+                if hex_code:
+                    asm_to_hex_b.append(line)
+                    asm_to_hex_a.append(f"{' '.join([hex_code[i:i+2] for i in range(0, len(hex_code), 2)])}")
+                    current_address += len(bytes.fromhex(hex_code))
+        except Exception as e:
+            # print(f"Error during assembly: {e}")
+            return
+
+
+        self.a_b_maps.a, self.a_b_maps.b = asm_to_hex_a, asm_to_hex_b
         # 初始化转化的 string 以及索引
         self.a_b_maps.clear()
         self.a_b_maps.b_string = asm_text_all
@@ -331,7 +371,9 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
             if (start_idx >= len(self.a_b_maps.a_string)):
                 break
         self.a_b_maps.a_zip = list(zip(self.a_b_maps.a_key_idx, self.a_b_maps.a_start, self.a_b_maps.a_end))
-
+        print("asm_to_hex:")
+        print("self.a_b_maps.a_zip",self.a_b_maps.a_zip)
+        print("self.a_b_maps.b_zip", self.a_b_maps.b_zip)
 
 
     def on_left_text_changed(self):
