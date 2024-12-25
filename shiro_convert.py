@@ -9,26 +9,7 @@ from PyQt5.QtCore import QTimer
 import binascii
 import re
 
-def convert_right_to_left(text):
-    result = []
-    for i in range(0, len(text), 2):
-        result.append(text[i])
-    return ''.join(result)
-
-
-def convert_left_to_right(text):
-    """将左边的文本转换为固定的格式，例如 a -> aa"""
-    result = []
-    left_positions = []  # 保存左边字母的位置
-    right_positions = []  # 保存右边字母的位置
-
-    for index, char in enumerate(text):
-        if char.isalpha():  # 确保是字母
-            left_positions.append(index)  # 记录字母在左侧的位置
-            result.append(char * 2)  # 每个字母转为两个字符
-            right_positions.append((index * 2, (index + 1) * 2))  # 对应右侧的起始和结束位置
-
-    return {'left_positions': left_positions, 'right_positions': right_positions}, ''.join(result)
+import idc
 
 
 class mapping():
@@ -73,13 +54,12 @@ class mapping():
         self.a_start_idx = 0
         self.a_end_idx = 0
 
-
     def get_mapping_a_to_b(self, start_position, end_position):
         print("start_position, end_position:", start_position, end_position)
-        print("self.a_zip:",self.a_zip)
-        print("self.b_zip:",self.b_zip)
-        print("self.a_string:",self.a_string)
-        print("self.b_string:",self.b_string)
+        print("self.a_zip:", self.a_zip)
+        print("self.b_zip:", self.b_zip)
+        print("self.a_string:", self.a_string)
+        print("self.b_string:", self.b_string)
         for i in range(len(self.a_zip)):
             if self.a_zip[i][1] == start_position:
                 self.b_start_idx = self.b_zip[i][1]
@@ -164,6 +144,27 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         main_layout.addWidget(self.hex_input)
         main_layout.addWidget(self.asm_input)
 
+        # 切换按钮
+        self.toggle_button = QtWidgets.QPushButton("patcher")
+        self.toggle_button.clicked.connect(self.toggle_input_row)
+        arch_layout.addWidget(self.toggle_button)
+        self.input_row_widget = QtWidgets.QWidget()
+        self.input_row_layout = QtWidgets.QHBoxLayout(self.input_row_widget)
+        self.address_input_field = QtWidgets.QLineEdit()
+        self.address_input_field.setPlaceholderText("address")
+        self.patch_button = QtWidgets.QPushButton("patch")
+        self.apply_button = QtWidgets.QPushButton("apply to source file")
+        self.patch_button.clicked.connect(self.patch_button_clicked)
+        self.apply_button.clicked.connect(self.apply_button_clicked)
+        self.input_row_layout.addWidget(self.address_input_field)
+        self.input_row_layout.addWidget(self.patch_button)
+        self.input_row_layout.addWidget(self.apply_button)
+        self.input_row_widget.setVisible(False)
+        arch_layout.addWidget(self.input_row_widget)
+        self.log_label = QtWidgets.QLabel("")
+        self.input_row_layout.addWidget(self.log_label)
+
+
         layout.addLayout(main_layout)
         self.setLayout(layout)
 
@@ -177,6 +178,31 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         self.asm_input.selectionChanged.connect(self.on_right_selection_changed)
 
         QTimer.singleShot(0, self.show)
+
+    def toggle_input_row(self):
+        # 切换输入行的可见性
+        if self.input_row_widget.isVisible():
+            self.input_row_widget.setVisible(False)
+            self.toggle_button.setText("Show Input Row")
+        else:
+            self.input_row_widget.setVisible(True)
+            self.toggle_button.setText("Hide Input Row")
+        # 调整窗口大小以适应内容
+        self.adjustSize()
+
+    def patch_button_clicked(self):
+        address = self.address_input_field.text()
+        address = int(address, 16)
+        patch_bytes = self.a_b_maps.a_string.replace(' ', '').replace('\n', '')
+        patch_bytes = [int(patch_bytes[i:i+2], 16) for i in range(0, len(patch_bytes), 2)]
+        for i in range(len(patch_bytes)):
+            idc.patch_byte(address + i, patch_bytes[i])
+        self.log_label.setText("patched")
+        pass
+
+    def apply_button_clicked(self):
+        self.log_label.setText("applied")
+        pass
 
     def update_architecture(self):
         """更新选择的架构并重新初始化Keystone和Capstone"""
@@ -238,7 +264,7 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         self.a_b_maps.a_string = hex_text
         a_idx = 0
         start_idx = 0
-        while(True):
+        while (True):
             start_idx = self.a_b_maps.a_string.find(self.a_b_maps.a[a_idx], start_idx)
             if (start_idx == -1):
                 break
@@ -252,11 +278,11 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
             if (start_idx >= len(self.a_b_maps.a_string)):
                 break
         self.a_b_maps.a_zip = list(zip(self.a_b_maps.a_key_idx, self.a_b_maps.a_start, self.a_b_maps.a_end))
-        
+
         b_idx = 0
         start_idx = 0
         self.a_b_maps.b_string = ''.join(self.a_b_maps.b)
-        while(True):
+        while (True):
             start_idx = self.a_b_maps.b_string.find(self.a_b_maps.b[b_idx], start_idx)
             if (start_idx == -1):
                 break
@@ -271,9 +297,8 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
                 break
         self.a_b_maps.b_zip = list(zip(self.a_b_maps.b_key_idx, self.a_b_maps.b_start, self.a_b_maps.b_end))
         print("asm_to_hex:")
-        print("self.a_b_maps.a_zip",self.a_b_maps.a_zip)
+        print("self.a_b_maps.a_zip", self.a_b_maps.a_zip)
         print("self.a_b_maps.b_zip", self.a_b_maps.b_zip)
-
 
     def asm_to_hex(self, asm_text):
         # 将asm转换为hex，初始化a, b的映射
@@ -283,20 +308,6 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         asm_text_all = asm_text
         asm_to_hex_a = []
         asm_to_hex_b = []
-
-        # asm_text = asm_text.splitlines()
-        # try:
-        #     for line in asm_text:
-        #         if line.strip() == "":
-        #             continue
-        #         encoding, _ = self.ks.asm(line)
-        #         hex_code = binascii.hexlify(bytearray(encoding)).decode('utf-8')
-        #         hex_code = ' '.join([hex_code[i:i+2] for i in range(0, len(hex_code), 2)])
-        #         asm_to_hex_a.append(hex_code)
-        #         asm_to_hex_b.append(line)
-        # except Exception as e:
-        #     # hex_code = "Invalid assembly input"
-        #     pass
 
         try:
             # 一次性汇编整个代码
@@ -312,12 +323,12 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
             for line in asm_text_all.splitlines():
                 stripped_line = line.strip()
 
-                if stripped_line.replace(' ', '') == "":# 空行
+                if stripped_line.replace(' ', '') == "":  # 空行
                     asm_to_hex_b.append(line)
                     asm_to_hex_a.append("")
                     continue
 
-                if (':' in stripped_line):# 标签行
+                if (':' in stripped_line):  # 标签行
                     asm_to_hex_b.append(line)
                     asm_to_hex_a.append("")
                     continue
@@ -326,12 +337,11 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
                 hex_code = disassembled.get(current_address, None)
                 if hex_code:
                     asm_to_hex_b.append(line)
-                    asm_to_hex_a.append(f"{' '.join([hex_code[i:i+2] for i in range(0, len(hex_code), 2)])}")
+                    asm_to_hex_a.append(f"{' '.join([hex_code[i:i + 2] for i in range(0, len(hex_code), 2)])}")
                     current_address += len(bytes.fromhex(hex_code))
         except Exception as e:
             # print(f"Error during assembly: {e}")
             return
-
 
         self.a_b_maps.a, self.a_b_maps.b = asm_to_hex_a, asm_to_hex_b
         # 初始化转化的 string 以及索引
@@ -339,7 +349,7 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         self.a_b_maps.b_string = asm_text_all
         b_idx = 0
         start_idx = 0
-        while(True):
+        while (True):
             start_idx = self.a_b_maps.b_string.find(self.a_b_maps.b[b_idx], start_idx)
             if (start_idx == -1):
                 break
@@ -357,7 +367,7 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         self.a_b_maps.a_string = ' '.join(self.a_b_maps.a)
         a_idx = 0
         start_idx = 0
-        while(True):
+        while (True):
             start_idx = self.a_b_maps.a_string.find(self.a_b_maps.a[a_idx], start_idx)
             if (start_idx == -1):
                 break
@@ -372,22 +382,21 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
                 break
         self.a_b_maps.a_zip = list(zip(self.a_b_maps.a_key_idx, self.a_b_maps.a_start, self.a_b_maps.a_end))
         print("asm_to_hex:")
-        print("self.a_b_maps.a_zip",self.a_b_maps.a_zip)
+        print("self.a_b_maps.a_zip", self.a_b_maps.a_zip)
         print("self.a_b_maps.b_zip", self.a_b_maps.b_zip)
-
 
     def on_left_text_changed(self):
         """处理左侧输入框的文本变化"""
         hex_text = self.hex_input.toPlainText().strip()
         hex_text = re.sub(r'[^0-9a-fA-F]', '', hex_text)
-        hex_text = hex_text.replace(' ','')
+        hex_text = hex_text.replace(' ', '')
         if (len(hex_text) % 2 == 0):
-            hex_text = ' '.join([hex_text[i:i+2] for i in range(0, len(hex_text), 2)])
+            hex_text = ' '.join([hex_text[i:i + 2] for i in range(0, len(hex_text), 2)])
             if (hex_text != self.hex_input.toPlainText().strip()):
                 self.save_cursor()
                 self.hex_input.setPlainText(hex_text)
                 self.restore_cursor()
-        print("hex_text",hex_text)
+        print("hex_text", hex_text)
         try:
             self.asm_input.blockSignals(True)
             self.hex_to_asm(hex_text)
@@ -396,7 +405,7 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
             return
         if not self.a_b_maps.a:
             return
-        
+
         # 更新右侧文本
         self.asm_input.blockSignals(True)
         self.save_cursor()
@@ -424,9 +433,11 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
 
     def restore_cursor(self):
         self.hex_input.textCursor().setPosition(self.last_left_cursor_pos_start)
-        self.hex_input.textCursor().setPosition(min(self.last_left_cursor_pos_end, len(self.hex_input.toPlainText())), QtGui.QTextCursor.KeepAnchor)
+        self.hex_input.textCursor().setPosition(min(self.last_left_cursor_pos_end, len(self.hex_input.toPlainText())),
+                                                QtGui.QTextCursor.KeepAnchor)
         self.asm_input.textCursor().setPosition(self.last_right_cursor_pos_start)
-        self.asm_input.textCursor().setPosition(min(self.last_right_cursor_pos_end, len(self.asm_input.toPlainText())), QtGui.QTextCursor.KeepAnchor)
+        self.asm_input.textCursor().setPosition(min(self.last_right_cursor_pos_end, len(self.asm_input.toPlainText())),
+                                                QtGui.QTextCursor.KeepAnchor)
 
     def save_cursor(self):
         left_start = self.hex_input.textCursor().selectionStart()
