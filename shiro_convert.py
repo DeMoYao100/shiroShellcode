@@ -8,8 +8,126 @@ from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_ARM64, CS_ARCH_MIPS, 
 from PyQt5.QtCore import QTimer
 import binascii
 import re
-
+import ida_segment
+import os
+import tkinter as tk
+from tkinter import filedialog
+import ida_bytes
 import idc
+import ida_nalt
+import idautils
+
+
+def ask_file(save, prompt, filetypes=[("All Files", "*.*")]):
+    """
+    Custom file dialog for selecting or saving a file.
+    :param save: Boolean, True for saving a file, False for opening a file.
+    :param prompt: Dialog prompt string.
+    :param filetypes: List of file type filters for the dialog.
+    :return: Selected file path or None if canceled.
+    """
+    # Create a hidden Tkinter root window
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)  # Bring the dialog to the front
+
+    if save:
+        file_path = filedialog.asksaveasfilename(title=prompt, filetypes=filetypes)
+    else:
+        file_path = filedialog.askopenfilename(title=prompt, filetypes=filetypes)
+
+    root.destroy()
+    return file_path
+
+def find_changed_bytes():
+    """Find bytes in the IDB that have been modified."""
+    changed_bytes = []
+
+    seg = ida_segment.get_first_seg()
+    while seg:
+        ea = seg.start_ea
+        while ea < seg.end_ea:
+            if ida_bytes.is_loaded(ea):
+                byte = ida_bytes.get_byte(ea)
+                original_byte = idaapi.get_original_byte(ea)
+                if byte != original_byte:
+                    changed_bytes.append((ea, byte, original_byte))
+            ea += 1
+        seg = ida_segment.get_next_seg(seg.start_ea)
+
+    return changed_bytes
+
+def patch_file(original_file, changed_bytes):
+    """Patch a new file with modified bytes."""
+    # Read the original file into memory
+    try:
+        with open(original_file, 'rb') as f:
+            data = bytearray(f.read())
+    except Exception as e:
+        # print(f"Error reading original file: {e}")
+        return
+
+    # Apply the changes
+    for ea, byte, original_byte in changed_bytes:
+        file_offset = idaapi.get_fileregion_offset(ea)
+        if file_offset != -1:
+            data[file_offset] = byte
+            # print(f'Patched: 0x{file_offset:X} with 0x{byte:02X} (original: 0x{original_byte:02X})')
+        else:
+            # print(f"Skipping EA {ea:X}: No file offset found.")
+            pass
+
+    # Ask the user for a new file path
+    patched_file = ask_file(True, 'Choose new file to save patched data', [("Binary Files", "*.bin"), ("All Files", "*.*")])
+    if patched_file:
+        try:
+            os.makedirs(os.path.dirname(patched_file), exist_ok=True)
+            with open(patched_file, 'wb') as f:
+                f.write(data)
+            # print(f"Patched file saved to: {patched_file}")
+        except Exception as e:
+            # print(f"Error saving patched file: {e}")
+            pass
+    else:
+        # print("No file selected for saving.")
+        pass
+
+def save_button_connect():
+    # print('Finding changed bytes...')
+    changed_bytes = find_changed_bytes()
+    # print(f'done. {len(changed_bytes)} changed bytes found')
+
+    if changed_bytes:
+        original_file = idaapi.get_input_file_path()
+        # print(f'Original file: {original_file}')
+
+        if not os.path.exists(original_file):
+            original_file = ask_file(False, 'Select original file to patch', [("Binary Files", "*.*"), ("All Files", "*.*")])
+
+        if os.path.exists(original_file):
+            patch_file(original_file, changed_bytes)
+        else:
+            # print('No valid file to patch provided')
+            pass
+    else:
+        # print('No changes to patch')
+        pass
+
+def get_image_base():
+    """
+    获取 IDA 加载的最低地址（基地址）
+    """
+    return ida_nalt.get_imagebase()
+
+
+def get_symbol_address(symbol_name):
+    """
+    获取 ELF 文件中指定符号的地址
+    """
+    for symbol_ea, name in idautils.Names():  # Names() 返回符号地址和名称的迭代器
+        if name == symbol_name:
+            return symbol_ea
+    return None
 
 
 class mapping():
@@ -19,7 +137,7 @@ class mapping():
     b_input_string = ''
     a: list[str] = []
     b: list[str] = []
-
+    address = get_image_base()
     # 这组用来idx
     a_start = []
     b_start = []
@@ -36,6 +154,7 @@ class mapping():
     a_end_idx = 0
 
     def __init__(self):
+        self.address = get_image_base()
         pass
 
     def clear(self):
@@ -54,12 +173,61 @@ class mapping():
         self.a_start_idx = 0
         self.a_end_idx = 0
 
+    def preprocess_instructions(self, instructions):
+        """
+        预处理指令，解析符号，仅替换外部符号，保留自定义标签
+        """
+        labels = set()  # 存储自定义标签
+        processed_lines = []
+        base_address = self.address
+        # 首先扫描一遍，记录所有标签
+        for line in instructions:
+            line = line.rstrip()  # 保留行尾空格
+            if not line:
+                processed_lines.append("")  # 保留空行
+                continue
+
+            if line.endswith(":"):  # 标签定义
+                label_name = line[:-1]
+                labels.add(label_name)
+                processed_lines.append(line)  # 标签直接保留
+            else:
+                processed_lines.append("")  # 保留结构和位置
+
+        # 替换指令中的外部符号
+        result = []
+        for line in instructions:
+            line = line.rstrip()  # 保留行尾空格
+            if not line or line.endswith(":"):
+                result.append(line)  # 空行和标签直接保留
+                continue
+
+            parts = line.split(maxsplit=1)
+            instruction_type = parts[0]
+            target = parts[1] if len(parts) > 1 else None
+
+            # 如果目标是自定义标签，保持原样
+            if target in labels or target is None:
+                result.append(line)
+            else:
+                # 尝试解析符号地址
+                symbol_address = get_symbol_address(target)
+                if symbol_address is not None:
+                    processed_line = f"{instruction_type} {hex(symbol_address)}"
+                    result.append(processed_line)
+                else:
+                    # print(f"[!] 未找到符号或无效的目标: {target}")
+                    result.append(line)  # 无法解析时，保留原指令
+
+        # 将预处理结果组装为字符串，保持原始的换行符和空格
+        return "\n".join(result)
+
     def get_mapping_a_to_b(self, start_position, end_position):
-        print("start_position, end_position:", start_position, end_position)
-        print("self.a_zip:", self.a_zip)
-        print("self.b_zip:", self.b_zip)
-        print("self.a_string:", self.a_string)
-        print("self.b_string:", self.b_string)
+        # print("start_position, end_position:", start_position, end_position)
+        # print("self.a_zip:", self.a_zip)
+        # print("self.b_zip:", self.b_zip)
+        # print("self.a_string:", self.a_string)
+        # print("self.b_string:", self.b_string)
         for i in range(len(self.a_zip)):
             if self.a_zip[i][1] == start_position:
                 self.b_start_idx = self.b_zip[i][1]
@@ -72,7 +240,7 @@ class mapping():
             elif i + 1 == len(self.a_zip):
                 if self.a_zip[i][2] <= end_position:
                     self.b_end_idx = self.b_zip[i][2]
-        print(self.b_start_idx, self.b_end_idx)
+        # print(self.b_start_idx, self.b_end_idx)
         return self.b_start_idx, self.b_end_idx
         # return self.b_string[self.b_start_idx: self.b_end_idx]
 
@@ -144,28 +312,33 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         main_layout.addWidget(self.hex_input)
         main_layout.addWidget(self.asm_input)
 
+
+        patcher_layout = QtWidgets.QHBoxLayout()
         # 切换按钮
         self.toggle_button = QtWidgets.QPushButton("patcher")
         self.toggle_button.clicked.connect(self.toggle_input_row)
-        arch_layout.addWidget(self.toggle_button)
+        patcher_layout.addWidget(self.toggle_button)
         self.input_row_widget = QtWidgets.QWidget()
         self.input_row_layout = QtWidgets.QHBoxLayout(self.input_row_widget)
         self.address_input_field = QtWidgets.QLineEdit()
         self.address_input_field.setPlaceholderText("address")
         self.patch_button = QtWidgets.QPushButton("patch")
         self.apply_button = QtWidgets.QPushButton("apply to source file")
+        self.save_button = QtWidgets.QPushButton("Save as")
         self.patch_button.clicked.connect(self.patch_button_clicked)
         self.apply_button.clicked.connect(self.apply_button_clicked)
+        self.save_button.clicked.connect(self.save_button_clicked)
         self.input_row_layout.addWidget(self.address_input_field)
         self.input_row_layout.addWidget(self.patch_button)
-        self.input_row_layout.addWidget(self.apply_button)
+        # self.input_row_layout.addWidget(self.apply_button)
+        self.input_row_layout.addWidget(self.save_button)
         self.input_row_widget.setVisible(False)
-        arch_layout.addWidget(self.input_row_widget)
+        patcher_layout.addWidget(self.input_row_widget)
         self.log_label = QtWidgets.QLabel("")
         self.input_row_layout.addWidget(self.log_label)
 
-
         layout.addLayout(main_layout)
+        layout.addLayout(patcher_layout)
         self.setLayout(layout)
 
         self.ks = None
@@ -183,10 +356,10 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         # 切换输入行的可见性
         if self.input_row_widget.isVisible():
             self.input_row_widget.setVisible(False)
-            self.toggle_button.setText("Show Input Row")
+            self.toggle_button.setText("patcher")
         else:
             self.input_row_widget.setVisible(True)
-            self.toggle_button.setText("Hide Input Row")
+            self.toggle_button.setText("hide patcher")
         # 调整窗口大小以适应内容
         self.adjustSize()
 
@@ -194,7 +367,7 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         address = self.address_input_field.text()
         address = int(address, 16)
         patch_bytes = self.a_b_maps.a_string.replace(' ', '').replace('\n', '')
-        patch_bytes = [int(patch_bytes[i:i+2], 16) for i in range(0, len(patch_bytes), 2)]
+        patch_bytes = [int(patch_bytes[i:i + 2], 16) for i in range(0, len(patch_bytes), 2)]
         for i in range(len(patch_bytes)):
             idc.patch_byte(address + i, patch_bytes[i])
         self.log_label.setText("patched")
@@ -202,6 +375,11 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
 
     def apply_button_clicked(self):
         self.log_label.setText("applied")
+        pass
+
+    def save_button_clicked(self):
+        save_button_connect()
+        # self.log_label.setText("Saved to")
         pass
 
     def update_architecture(self):
@@ -251,7 +429,7 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         hex_to_asm_b = []
         try:
             code = bytes.fromhex(hex_text)
-            for insn in self.cs.disasm(code, 0x1000):
+            for insn in self.cs.disasm(code, self.a_b_maps.address):
                 hex_to_asm_b.append(f"{insn.mnemonic} {insn.op_str}\n")
                 hex_to_asm_a.append(binascii.hexlify(insn.bytes).decode())
         except Exception as e:
@@ -264,54 +442,56 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         self.a_b_maps.a_string = hex_text
         a_idx = 0
         start_idx = 0
-        while (True):
+        while True:
             start_idx = self.a_b_maps.a_string.find(self.a_b_maps.a[a_idx], start_idx)
-            if (start_idx == -1):
+            if start_idx == -1:
                 break
             self.a_b_maps.a_start.append(start_idx)
             self.a_b_maps.a_key_idx.append(a_idx)
             start_idx += len(self.a_b_maps.a[a_idx])
             self.a_b_maps.a_end.append(start_idx)
             a_idx += 1
-            if (a_idx == len(self.a_b_maps.a)):
+            if a_idx == len(self.a_b_maps.a):
                 break
-            if (start_idx >= len(self.a_b_maps.a_string)):
+            if start_idx >= len(self.a_b_maps.a_string):
                 break
         self.a_b_maps.a_zip = list(zip(self.a_b_maps.a_key_idx, self.a_b_maps.a_start, self.a_b_maps.a_end))
 
         b_idx = 0
         start_idx = 0
         self.a_b_maps.b_string = ''.join(self.a_b_maps.b)
-        while (True):
+        while True:
             start_idx = self.a_b_maps.b_string.find(self.a_b_maps.b[b_idx], start_idx)
-            if (start_idx == -1):
+            if start_idx == -1:
                 break
             self.a_b_maps.b_start.append(start_idx)
             self.a_b_maps.b_key_idx.append(b_idx)
             start_idx += len(self.a_b_maps.b[b_idx])
             self.a_b_maps.b_end.append(start_idx)
             b_idx += 1
-            if (b_idx == len(self.a_b_maps.b)):
+            if b_idx == len(self.a_b_maps.b):
                 break
-            if (start_idx >= len(self.a_b_maps.b_string)):
+            if start_idx >= len(self.a_b_maps.b_string):
                 break
         self.a_b_maps.b_zip = list(zip(self.a_b_maps.b_key_idx, self.a_b_maps.b_start, self.a_b_maps.b_end))
-        print("asm_to_hex:")
-        print("self.a_b_maps.a_zip", self.a_b_maps.a_zip)
-        print("self.a_b_maps.b_zip", self.a_b_maps.b_zip)
+        # print("asm_to_hex:")
+        # print("self.a_b_maps.a_zip", self.a_b_maps.a_zip)
+        # print("self.a_b_maps.b_zip", self.a_b_maps.b_zip)
 
     def asm_to_hex(self, asm_text):
         # 将asm转换为hex，初始化a, b的映射
         if not asm_text:
             self.hex_input.clear()
             return
-        asm_text_all = asm_text
+        asm_text_all = self.a_b_maps.preprocess_instructions(asm_text.splitlines())
+        # print("base:", hex(get_image_base()))
+        # print(asm_text_all)
         asm_to_hex_a = []
         asm_to_hex_b = []
 
         try:
             # 一次性汇编整个代码
-            start_address = 0x1000
+            start_address = self.a_b_maps.address
             encoding, _ = self.ks.asm(asm_text_all, start_address)
 
             # 使用 Capstone 逐条反汇编以获取每条指令的信息
@@ -328,7 +508,7 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
                     asm_to_hex_a.append("")
                     continue
 
-                if (':' in stripped_line):  # 标签行
+                if ':' in stripped_line:  # 标签行
                     asm_to_hex_b.append(line)
                     asm_to_hex_a.append("")
                     continue
@@ -349,54 +529,58 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
         self.a_b_maps.b_string = asm_text_all
         b_idx = 0
         start_idx = 0
-        while (True):
+        while True:
             start_idx = self.a_b_maps.b_string.find(self.a_b_maps.b[b_idx], start_idx)
-            if (start_idx == -1):
+            if start_idx == -1:
                 break
             self.a_b_maps.b_start.append(start_idx)
             self.a_b_maps.b_key_idx.append(b_idx)
             start_idx += len(self.a_b_maps.b[b_idx])
             self.a_b_maps.b_end.append(start_idx)
             b_idx += 1
-            if (b_idx == len(self.a_b_maps.b)):
+            if b_idx == len(self.a_b_maps.b):
                 break
-            if (start_idx >= len(self.a_b_maps.b_string)):
+            if start_idx >= len(self.a_b_maps.b_string):
                 break
         self.a_b_maps.b_zip = list(zip(self.a_b_maps.b_key_idx, self.a_b_maps.b_start, self.a_b_maps.b_end))
 
         self.a_b_maps.a_string = ' '.join(self.a_b_maps.a)
         a_idx = 0
         start_idx = 0
-        while (True):
+        while True:
             start_idx = self.a_b_maps.a_string.find(self.a_b_maps.a[a_idx], start_idx)
-            if (start_idx == -1):
+            if start_idx == -1:
                 break
             self.a_b_maps.a_start.append(start_idx)
             self.a_b_maps.a_key_idx.append(a_idx)
             start_idx += len(self.a_b_maps.a[a_idx])
             self.a_b_maps.a_end.append(start_idx)
             a_idx += 1
-            if (a_idx == len(self.a_b_maps.a)):
+            if a_idx == len(self.a_b_maps.a):
                 break
-            if (start_idx >= len(self.a_b_maps.a_string)):
+            if start_idx >= len(self.a_b_maps.a_string):
                 break
         self.a_b_maps.a_zip = list(zip(self.a_b_maps.a_key_idx, self.a_b_maps.a_start, self.a_b_maps.a_end))
-        print("asm_to_hex:")
-        print("self.a_b_maps.a_zip", self.a_b_maps.a_zip)
-        print("self.a_b_maps.b_zip", self.a_b_maps.b_zip)
+        # print("asm_to_hex:")
+        # print("self.a_b_maps.a_zip", self.a_b_maps.a_zip)
+        # print("self.a_b_maps.b_zip", self.a_b_maps.b_zip)
 
     def on_left_text_changed(self):
         """处理左侧输入框的文本变化"""
+        if self.address_input_field.text() != '':
+            self.a_b_maps.address = self.address_input_field.text()
+            self.a_b_maps.address = int(self.a_b_maps.address, 16)
+            # print("on_left_text_changed", self.a_b_maps.address)
         hex_text = self.hex_input.toPlainText().strip()
         hex_text = re.sub(r'[^0-9a-fA-F]', '', hex_text)
         hex_text = hex_text.replace(' ', '')
-        if (len(hex_text) % 2 == 0):
+        if len(hex_text) % 2 == 0:
             hex_text = ' '.join([hex_text[i:i + 2] for i in range(0, len(hex_text), 2)])
-            if (hex_text != self.hex_input.toPlainText().strip()):
+            if hex_text != self.hex_input.toPlainText().strip():
                 self.save_cursor()
                 self.hex_input.setPlainText(hex_text)
                 self.restore_cursor()
-        print("hex_text", hex_text)
+        # print("hex_text", hex_text)
         try:
             self.asm_input.blockSignals(True)
             self.hex_to_asm(hex_text)
@@ -415,6 +599,10 @@ class HexAsmConverterDialog(QtWidgets.QDialog):
 
     def on_right_text_changed(self):
         """处理右侧输入框的文本变化"""
+        if self.address_input_field.text() != '':
+            self.a_b_maps.address = self.address_input_field.text()
+            self.a_b_maps.address = int(self.a_b_maps.address, 16)
+            print("on_right_text_changed", self.a_b_maps.address)
         asm_text = self.asm_input.toPlainText().strip()
         try:
             self.hex_input.blockSignals(True)
@@ -521,7 +709,7 @@ class HexAsmConverterPlugin(idaapi.plugin_t):
     wanted_hotkey = "Ctrl+Shift+C"
 
     def init(self):
-        print("Hex <-> Asm Converter Plugin initialized.")
+        # print("Hex <-> Asm Converter Plugin initialized.")
         return idaapi.PLUGIN_OK
 
     def run(self, arg):
